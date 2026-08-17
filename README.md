@@ -2,7 +2,9 @@
 
 Hand-written [Triton](https://triton-lang.org) kernels for RMSNorm and softmax, plus a fused
 version that computes both in a single pass, with a harness that proves the fusion is correct
-and quantifies exactly how much HBM traffic it eliminates.
+and quantifies exactly how much HBM traffic it eliminates. The fused kernel is also ported to
+[NKI](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/nki/index.html) for AWS
+Trainium and validated on Neuron's CPU simulator.
 
 RMSNorm and softmax are memory-bandwidth bound: they do very little arithmetic per byte they
 touch. Run as two separate kernels, the intermediate tensor is written to HBM by the first and
@@ -81,6 +83,36 @@ slack. The full investigation is reproducible via `scripts/bf16_precision_study.
 
 In fp32 the two pipelines agree to the bit, which is the expected result and a useful control.
 
+## The Trainium port
+
+The fused kernel is also implemented in [NKI](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/nki/index.html),
+the Neuron Kernel Interface for AWS Trainium, and validated on Neuron's CPU simulator
+(`kernels_nki/`, verified by `scripts/nki_verify.py`). No Trainium hardware was involved and
+no timing is claimed for it — the simulator establishes numerics only.
+
+| shape | max abs err | max rel err |
+| --- | ---: | ---: |
+| 128x512 | 1.563e-07 | 1.277e-06 |
+| 1024x4096 | 3.531e-07 | 2.829e-06 |
+
+The interesting part is that the *decomposition had to change*. A NeuronCore's SBUF is
+physically 128 partitions wide, and NKI exposes that as a hard limit: a tile's first axis is
+the partition axis and cannot exceed `nl.tile_size.pmax` = 128, and **reductions may only run
+along free axes**, never the partition axis. A row-wise reduction therefore requires rows on
+partitions and columns on the free axis, so the kernel becomes an explicit loop over
+`ceil(M / 128)` blocks of shape `(128, N)`. Triton's one-row-per-program-instance structure
+does not carry over at all.
+
+The two languages also mean different things by fusion. Triton's compiler owns on-chip
+storage, so an intermediate stays resident by virtue of you *not* calling `tl.store`. NKI
+names SBUF explicitly and you place tiles in it yourself. Same traffic reduction, different
+amount of control.
+
+[`docs/NKI_NOTES.md`](docs/NKI_NOTES.md) records the verified API, including several places
+where the obvious guess is wrong — the simulator entry point is `nki.simulate`, not
+`nki.simulate_kernel`; `nl.arange` does not exist; and `NkiTensor` does not overload
+arithmetic operators, so every operation is an explicit `nl.add` / `nl.multiply` call.
+
 ## Running it
 
 Triton ships Linux wheels only, so everything runs in a container. No GPU required.
@@ -101,6 +133,16 @@ docker run --rm -e TRITON_INTERPRET=1 -e PYTHONPATH=/work \
     -v "$PWD:/work" -w /work kfl:cpu python scripts/bf16_precision_study.py
 ```
 
+The Trainium port needs a second image, because `neuronx-cc` pins NumPy below 2.x and would
+otherwise conflict with the Triton environment:
+
+```bash
+docker build -f Dockerfile.nki -t kfl:nki .
+
+docker run --rm -e PYTHONPATH=/work -v "$PWD:/work" -w /work kfl:nki \
+    python scripts/nki_verify.py
+```
+
 `TRITON_INTERPRET` must be set before `triton` is imported, which is why it is passed as an
 environment variable rather than set in Python.
 
@@ -116,6 +158,8 @@ kernels/          Triton kernels; each docstring states what lives in HBM,
   rmsnorm.py
   softmax.py
   fused_rmsnorm_softmax.py
+kernels_nki/      the same fused kernel for AWS Trainium
+  fused_rmsnorm_softmax.py
 reference/        naive PyTorch implementations used as ground truth
 harness/
   config.py         shapes, dtypes, and epsilon-derived tolerances
@@ -125,11 +169,14 @@ harness/
   sweep.py          runs everything, writes docs/RESULTS.md
 tests/            pytest wrapper over the correctness harness
 scripts/
-  hello_kernel.py       toolchain smoke test
+  hello_kernel.py       Triton toolchain smoke test
   bf16_precision_study.py
+  nki_hello.py          Neuron toolchain smoke test
+  nki_verify.py         NKI kernel against a float64 ground truth
 notebooks/        Colab GPU benchmark
 docs/
   API_NOTES.md      Triton API details, read from the docs rather than recalled
+  NKI_NOTES.md      NKI API details, verified against the installed package
   RESULTS.md        generated; do not edit
 ```
 
