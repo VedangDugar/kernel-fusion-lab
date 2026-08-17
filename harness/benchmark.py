@@ -225,10 +225,12 @@ def format_markdown(timings: list[Timing], peak_gbps: float | None) -> str:
             gbps_txt = f"{t.achieved_gbps:.1f}"
             pct = f"{100.0 * t.achieved_gbps / peak_gbps:.1f}%" if peak_gbps else "not measured"
 
+        # A bare "[^]" would be parsed as a broken footnote reference by some
+        # markdown renderers, so the marker is plain text.
         marker = ""
         if t.note:
             notes.append(f"{t.shape[0]}x{t.shape[1]} {t.dtype} {t.provider}: {t.note}")
-            marker = " [^]"
+            marker = " (see note)"
 
         lines.append(
             f"| {t.shape[0]}x{t.shape[1]} | {t.dtype} | {t.provider}{marker} | "
