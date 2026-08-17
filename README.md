@@ -1,5 +1,7 @@
 # Kernel Fusion Lab
 
+[![Open the GPU benchmark in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/VedangDugar/kernel-fusion-lab/blob/main/notebooks/colab_benchmark.ipynb)
+
 Hand-written [Triton](https://triton-lang.org) kernels for RMSNorm and softmax, plus a fused
 version that computes both in a single pass, with a harness that proves the fusion is correct
 and quantifies exactly how much HBM traffic it eliminates. The fused kernel is also ported to
@@ -146,8 +148,14 @@ docker run --rm -e PYTHONPATH=/work -v "$PWD:/work" -w /work kfl:nki \
 `TRITON_INTERPRET` must be set before `triton` is imported, which is why it is passed as an
 environment variable rather than set in Python.
 
-For wall-clock numbers, open `notebooks/colab_benchmark.ipynb` in Google Colab, select a T4
-runtime, and run all cells.
+For wall-clock numbers, open the notebook in Google Colab via the badge at the top of this
+file, or directly:
+
+<https://colab.research.google.com/github/VedangDugar/kernel-fusion-lab/blob/main/notebooks/colab_benchmark.ipynb>
+
+Set `Runtime -> Change runtime type -> T4 GPU`, then `Runtime -> Run all`. The first cell
+fails fast if no GPU is attached, so a misconfigured runtime cannot silently produce
+meaningless numbers.
 
 ## Layout
 
