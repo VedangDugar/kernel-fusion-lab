@@ -1,0 +1,5 @@
+# torch is installed separately in the Dockerfile from the CPU-only wheel index.
+triton
+numpy
+pytest
+tabulate
