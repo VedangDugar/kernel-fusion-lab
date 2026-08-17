@@ -1,6 +1,6 @@
 # Results
 
-Generated 2026-08-17 03:14 UTC by `python -m harness.sweep`. Do not edit by hand.
+Generated 2026-08-17 03:32 UTC by `python -m harness.sweep`. Do not edit by hand.
 
 ## Environment
 
@@ -121,7 +121,26 @@ becomes negligible and the reduction tends to 50%.
 
 ## Wall-clock performance
 
+Median of the runtime distribution with 20th/80th percentiles, via
+`triton.testing.do_bench`. Percentages are against *measured* achievable
+bandwidth, not the datasheet figure.
+
+`GB/s (model-implied)` divides the analytical byte count by the measured time.
+That is only meaningful where the byte count is actually known, which is the
+two Triton kernels, since their loads and stores are visible in the source.
+`torch.compile` decides for itself how much to fuse, so the column is left
+blank for the PyTorch providers rather than filled with a number derived from
+an assumption that does not hold.
+
+Where a Triton row exceeds 100% of measured peak, the kernel is not breaking
+physics -- it is evidence that some of the traffic the model attributes to HBM
+was served from L2 instead. See the next section.
+
 **not measured** -- no GPU was available when this report was generated. Wall-clock timing is only collected on real hardware; see `notebooks/colab_benchmark.ipynb`.
+
+## Predicted versus measured
+
+**not measured** -- requires a GPU run.
 
 ## What these results do and do not establish
 

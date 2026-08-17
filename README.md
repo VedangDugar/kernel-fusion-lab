@@ -43,20 +43,64 @@ dtype sizes; the arithmetic is written out term by term in the docstring of
 | 1024x4096 | float32 | 240.05 MiB | 64.02 MiB | 32.02 MiB | 49.99% |
 | 1024x4096 | bfloat16 | 120.02 MiB | 32.01 MiB | 16.01 MiB | 49.99% |
 
-**Fusion improves accuracy in bf16.** This one was a surprise and is the most interesting
-result in the repo — see below.
+**Measured speedup, on a real GPU.** On a Tesla T4, at 1024x4096 fp32, the fused kernel runs
+**1.96x faster** than the unfused pair against a predicted 2.00x, at **92.3% of measured
+achievable bandwidth** (241.1 GB/s, measured by device-to-device copy rather than taken from
+the datasheet). Against naive eager PyTorch it is **7.1x faster**, against a predicted traffic
+ratio of 7.5x. Full tables in [`docs/RESULTS.md`](docs/RESULTS.md).
+
+It also modestly beats `torch.compile` in fp32 at the larger shapes — 0.151 ms versus
+0.172 ms at 1024x4096 — which was not the expected outcome, since Inductor fuses these same
+operations and emits Triton itself. At the smallest shape `torch.compile` wins, because at
+0.5 MiB of traffic the whole thing is launch-overhead bound.
+
+**Fusion improves accuracy in bf16.** This one was a surprise — see below.
+
+## The result that needed explaining
+
+The predicted 2x speedup does not appear at every shape. It arrives gradually:
+
+| shape | dtype | intermediate | fits in 4 MiB L2 | predicted | measured |
+| --- | --- | ---: | :--: | ---: | ---: |
+| 128x512 | float32 | 0.25 MiB | yes | 2.00x | 1.27x |
+| 256x1024 | float32 | 1.00 MiB | yes | 2.00x | 1.30x |
+| 512x2048 | bfloat16 | 2.00 MiB | yes | 2.00x | 1.34x |
+| 512x2048 | float32 | 4.00 MiB | borderline | 2.00x | 1.83x |
+| 1024x4096 | bfloat16 | 8.00 MiB | no | 2.00x | 1.91x |
+| 1024x4096 | float32 | 16.00 MiB | no | 2.00x | 1.96x |
+
+The analytical model assumes every byte of the intermediate round trip reaches HBM. When the
+intermediate fits in the T4's 4 MiB L2, it doesn't — the write and the read back are absorbed
+by cache, so fusion is eliminating traffic that was never expensive, and the speedup falls
+well short of prediction. As the intermediate outgrows L2 the prediction becomes accurate.
+
+The controlled comparison is the pair of **512x2048** rows. Same shape, same element count;
+only the dtype differs. In bf16 the intermediate is 2 MiB and fits in L2, giving 1.34x. In
+fp32 it is 4 MiB and does not comfortably fit, giving 1.83x. Nothing changed except how many
+bytes the intermediate occupies, which is exactly what the model claims should matter.
+
+There is a corollary worth stating plainly: **on this hardware, a bandwidth model alone would
+have overpredicted the benefit of fusion by up to 36%** at small shapes. The model is
+arithmetically correct and still incomplete, because HBM is not the only place bytes can live.
 
 ## What it does not establish
 
-**No wall-clock speedup is claimed.** Every number above was produced on a CPU, using
-Triton's interpreter (`TRITON_INTERPRET=1`), which executes kernel bodies sequentially in
-Python on top of NumPy. It validates logic and nothing else: it models neither the memory
-hierarchy nor occupancy nor latency. A timing taken there would describe the interpreter, not
-the kernel, so the harness reports `not measured` in every timing field rather than
-estimating one.
+**Nothing about hardware other than a T4.** The L2 threshold that shapes every result above is
+device-specific. On a GPU with a larger L2 the crossover moves to larger shapes; on one with
+more bandwidth relative to cache it moves the other way.
 
-`notebooks/colab_benchmark.ipynb` collects real timings on a free Colab GPU. Until it is run,
-the performance section of [`docs/RESULTS.md`](docs/RESULTS.md) stays empty by design.
+**Not a clean attribution of cause.** At the smallest shapes a single fused launch replaces
+two launches, and that helps regardless of bytes moved. This harness does not separate launch
+overhead from traffic reduction, so the 1.27x at 128x512 should not be read as purely a
+memory-traffic effect.
+
+**No bf16 comparison against `torch.compile`.** The T4 predates Ampere and has no native bf16
+support, so TorchInductor declines to compile bf16 and silently falls back to eager. Those
+rows are labelled in the results rather than being reported as a 16x win, which is what
+taking them at face value would have produced.
+
+**Nothing about Trainium performance.** The NKI port is validated on Neuron's CPU simulator,
+which establishes numerics only.
 
 ## The bf16 finding
 
@@ -218,6 +262,13 @@ These were fixed before any code was written and are visible in the results:
 
 - No fabricated benchmarks. If something was not measured, the harness prints
   `not measured` rather than an estimate.
+- A derived number is only reported where its assumptions actually hold. Bandwidth is computed
+  for the Triton kernels, whose loads and stores are visible in the source, and left blank for
+  `torch.compile`, which decides its own fusion. An earlier version of the harness did
+  attribute the naive eager byte count to `torch.compile` and produced "607% of peak", which is
+  how that bug was caught.
 - Every kernel docstring explains its memory movement explicitly.
 - Tolerances are derived from dtype epsilon. A failing kernel gets investigated and shown,
   never accommodated by widening a tolerance.
+- Where measurement disagrees with prediction, the disagreement gets explained rather than
+  buried. The L2 finding above is the main example.

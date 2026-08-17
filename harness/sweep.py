@@ -77,6 +77,9 @@ def main() -> int:
         peak = None
         timings = benchmark.run_all(SHAPES, DTYPES)
 
+    l2_bytes = benchmark.l2_cache_bytes()
+    prediction_md = benchmark.format_prediction_markdown(timings, SHAPES, DTYPES, l2_bytes)
+
     asserted_md, reported_md = _correctness_markdown(correctness)
     n_asserted = len([r for r in correctness if r.kind == ASSERTED])
     n_passed = n_asserted - len(failures)
@@ -87,12 +90,18 @@ def main() -> int:
 - The kernels are correct as *compiled* code, not merely as interpreted logic.
   The two can differ: the interpreter evaluates `tl.exp` with NumPy, while a
   GPU uses a faster approximate instruction.
+- The predicted traffic reduction does convert into a proportional speedup,
+  but only once the intermediate is too large to live in L2. See the
+  predicted-versus-measured table above; the ratio climbs toward 100% as the
+  working set grows past cache.
 
 Still not established:
 
-- Whether the predicted traffic reduction is the *whole* explanation for the
-  measured speedup. Traffic is one term; launch overhead, occupancy, and cache
-  behaviour also move the result."""
+- That the traffic reduction is the *only* mechanism at work. Launch overhead
+  dominates the smallest shapes, where a single fused launch replaces two
+  regardless of bytes moved, and the two effects are not separated here.
+- Anything about hardware other than the GPU this ran on. The L2 threshold
+  that shapes these results is device-specific."""
     else:
         not_established = """Not established without a GPU run:
 
@@ -166,7 +175,26 @@ becomes negligible and the reduction tends to 50%.
 
 ## Wall-clock performance
 
+Median of the runtime distribution with 20th/80th percentiles, via
+`triton.testing.do_bench`. Percentages are against *measured* achievable
+bandwidth, not the datasheet figure.
+
+`GB/s (model-implied)` divides the analytical byte count by the measured time.
+That is only meaningful where the byte count is actually known, which is the
+two Triton kernels, since their loads and stores are visible in the source.
+`torch.compile` decides for itself how much to fuse, so the column is left
+blank for the PyTorch providers rather than filled with a number derived from
+an assumption that does not hold.
+
+Where a Triton row exceeds 100% of measured peak, the kernel is not breaking
+physics -- it is evidence that some of the traffic the model attributes to HBM
+was served from L2 instead. See the next section.
+
 {benchmark.format_markdown(timings, peak)}
+
+## Predicted versus measured
+
+{prediction_md}
 
 ## What these results do and do not establish
 
