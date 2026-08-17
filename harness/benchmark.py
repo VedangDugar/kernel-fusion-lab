@@ -267,7 +267,12 @@ def format_prediction_markdown(
         f"L2 cache on this device: {l2_txt}. The intermediate column is the size of the "
         "tensor that fusion avoids round-tripping; compare it against L2.",
         "",
-        "| shape | dtype | intermediate | fits in L2 | predicted | measured | measured/predicted |",
+        "`L2-resident` is a judgement, not a measurement. The intermediate does not get "
+        "the cache to itself -- it competes with the input and output streams flowing "
+        "through it -- so an intermediate is only counted as resident below half of L2, "
+        "and `marginal` covers the band from there up to the full capacity.",
+        "",
+        "| shape | dtype | intermediate | L2-resident | predicted | measured | measured/predicted |",
         "| --- | --- | ---: | :--: | ---: | ---: | ---: |",
     ]
 
@@ -284,9 +289,14 @@ def format_prediction_markdown(
             actual = unfused.ms_median / fused.ms_median
 
             intermediate = shape[0] * shape[1] * traffic.element_bytes
-            fits = "yes" if l2_bytes and intermediate <= l2_bytes else "no"
             if l2_bytes is None:
                 fits = "?"
+            elif intermediate <= l2_bytes // 2:
+                fits = "yes"
+            elif intermediate <= l2_bytes:
+                fits = "marginal"
+            else:
+                fits = "no"
 
             lines.append(
                 f"| {shape[0]}x{shape[1]} | {name} | "

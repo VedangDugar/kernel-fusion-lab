@@ -44,8 +44,8 @@ dtype sizes; the arithmetic is written out term by term in the docstring of
 | 1024x4096 | bfloat16 | 120.02 MiB | 32.01 MiB | 16.01 MiB | 49.99% |
 
 **Measured speedup, on a real GPU.** On a Tesla T4, at 1024x4096 fp32, the fused kernel runs
-**1.96x faster** than the unfused pair against a predicted 2.00x, at **92.3% of measured
-achievable bandwidth** (241.1 GB/s, measured by device-to-device copy rather than taken from
+**1.96x faster** than the unfused pair against a predicted 2.00x, at **93.2% of measured
+achievable bandwidth** (238.9 GB/s, measured by device-to-device copy rather than taken from
 the datasheet). Against naive eager PyTorch it is **7.1x faster**, against a predicted traffic
 ratio of 7.5x. Full tables in [`docs/RESULTS.md`](docs/RESULTS.md).
 
@@ -58,29 +58,39 @@ operations and emits Triton itself. At the smallest shape `torch.compile` wins, 
 
 ## The result that needed explaining
 
-The predicted 2x speedup does not appear at every shape. It arrives gradually:
+The predicted 2x speedup does not appear at every shape, and it does not arrive gradually.
+Sorting every measured configuration by the size of the intermediate makes the pattern clear:
 
-| shape | dtype | intermediate | fits in 4 MiB L2 | predicted | measured |
+| shape | dtype | intermediate | L2-resident | predicted | measured |
 | --- | --- | ---: | :--: | ---: | ---: |
-| 128x512 | float32 | 0.25 MiB | yes | 2.00x | 1.27x |
-| 256x1024 | float32 | 1.00 MiB | yes | 2.00x | 1.30x |
-| 512x2048 | bfloat16 | 2.00 MiB | yes | 2.00x | 1.34x |
-| 512x2048 | float32 | 4.00 MiB | borderline | 2.00x | 1.83x |
+| 128x512 | bfloat16 | 0.12 MiB | yes | 2.00x | 1.33x |
+| 128x512 | float32 | 0.25 MiB | yes | 2.00x | 1.50x |
+| 256x1024 | bfloat16 | 0.50 MiB | yes | 2.00x | 1.31x |
+| 256x1024 | float32 | 1.00 MiB | yes | 2.00x | 1.22x |
+| 512x2048 | bfloat16 | 2.00 MiB | yes | 2.00x | 1.33x |
+| 512x2048 | float32 | 4.00 MiB | marginal | 2.00x | 1.84x |
 | 1024x4096 | bfloat16 | 8.00 MiB | no | 2.00x | 1.91x |
 | 1024x4096 | float32 | 16.00 MiB | no | 2.00x | 1.96x |
 
-The analytical model assumes every byte of the intermediate round trip reaches HBM. When the
-intermediate fits in the T4's 4 MiB L2, it doesn't — the write and the read back are absorbed
-by cache, so fusion is eliminating traffic that was never expensive, and the speedup falls
-well short of prediction. As the intermediate outgrows L2 the prediction becomes accurate.
+This is a threshold, not a ramp. Every configuration whose intermediate lives comfortably in
+cache lands between 1.2x and 1.5x, with no real trend inside that band. Every configuration
+whose intermediate exceeds cache lands above 1.9x, within a few percent of the predicted 2.00x.
+The transition happens across a single row.
+
+The analytical model assumes every byte of the intermediate round trip reaches HBM. While the
+intermediate fits in the T4's 4 MiB L2 it doesn't — the write and the read back are absorbed by
+cache, so fusion is removing traffic that was never expensive in the first place. Once the
+intermediate outgrows L2 the round trip really does go to memory and the prediction becomes
+accurate.
 
 The controlled comparison is the pair of **512x2048** rows. Same shape, same element count;
-only the dtype differs. In bf16 the intermediate is 2 MiB and fits in L2, giving 1.34x. In
-fp32 it is 4 MiB and does not comfortably fit, giving 1.83x. Nothing changed except how many
-bytes the intermediate occupies, which is exactly what the model claims should matter.
+only the dtype differs. In bf16 the intermediate is 2 MiB and sits in L2, giving 1.33x. In
+fp32 it is 4 MiB, which nominally equals L2 but cannot actually be resident because the input
+and output streams need that cache too, giving 1.84x. Nothing changed except how many bytes
+the intermediate occupies, which is exactly what the model claims should matter.
 
 There is a corollary worth stating plainly: **on this hardware, a bandwidth model alone would
-have overpredicted the benefit of fusion by up to 36%** at small shapes. The model is
+have overpredicted the benefit of fusion by 39%** at the worst shape. The model is
 arithmetically correct and still incomplete, because HBM is not the only place bytes can live.
 
 ## What it does not establish
@@ -90,9 +100,12 @@ device-specific. On a GPU with a larger L2 the crossover moves to larger shapes;
 more bandwidth relative to cache it moves the other way.
 
 **Not a clean attribution of cause.** At the smallest shapes a single fused launch replaces
-two launches, and that helps regardless of bytes moved. This harness does not separate launch
-overhead from traffic reduction, so the 1.27x at 128x512 should not be read as purely a
-memory-traffic effect.
+two launches, and that helps regardless of bytes moved. The table above contains direct
+evidence of this: 128x512 fp32 reaches 1.50x while the larger 256x1024 fp32 manages only
+1.22x, even though both intermediates sit inside L2 and the smaller shape moves fewer bytes.
+A pure traffic story cannot produce that ordering; fixed per-launch cost can. This harness
+does not separate the two effects, so nothing in the L2-resident band should be read as a
+purely memory-traffic result.
 
 **No bf16 comparison against `torch.compile`.** The T4 predates Ampere and has no native bf16
 support, so TorchInductor declines to compile bf16 and silently falls back to eager. Those
@@ -105,24 +118,25 @@ which establishes numerics only.
 ## The bf16 finding
 
 The first run of the correctness suite failed. The fused kernel and the unfused two-kernel
-sequence disagreed by **8.3% relative error** in bf16, far more than output rounding could
-account for.
+sequence disagreed by several percent of relative error in bf16 — 8.3% under the CPU
+interpreter where it first surfaced, and 3.6% to 4.7% across shapes on the T4 — far more than
+output rounding could account for.
 
 The cause turned out to be the point of the project, viewed from the other side. The unfused
 sequence *materialises* its intermediate `H = rmsnorm(X, W)` in memory, in the storage dtype.
 `H` reaches a magnitude of about 12, where one bf16 ULP is 0.062. Softmax converts an
 absolute perturbation of its logits into roughly the same relative perturbation of its
-outputs, so writing `H` to memory as bf16 costs ~8% accuracy. The fused kernel never writes
-`H`, so it never pays that cost.
+outputs, so writing `H` to memory as bf16 costs a few percent of accuracy. The fused kernel
+never writes `H`, so it never pays that cost.
 
 Scored against an fp64 ground truth:
 
 | pipeline | max relative error (bf16, 1024x4096) |
 | --- | --- |
-| fused kernel | 7.8e-3 |
-| unfused sequence | 9.1e-2 |
+| fused kernel | 3.9e-3 |
+| unfused sequence | 4.7e-2 |
 
-The fused kernel is roughly **10x more accurate**, not merely different. So the test was
+The fused kernel is roughly **12x more accurate**, not merely different. So the test was
 replaced with a stricter one rather than a looser one: `fusion_not_less_accurate` requires
 the fused kernel to be at least as close to fp64 truth as the unfused sequence, with no
 slack. The full investigation is reproducible via `scripts/bf16_precision_study.py`.
