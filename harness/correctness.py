@@ -126,9 +126,15 @@ def report(
     )
 
 
-def run_case(shape: tuple[int, int], dtype: torch.dtype) -> list[Result]:
-    """Every correctness check for one (shape, dtype) combination."""
-    x, weight = make_inputs(shape, dtype)
+def run_case(
+    shape: tuple[int, int], dtype: torch.dtype, device: str | None = None
+) -> list[Result]:
+    """Every correctness check for one (shape, dtype) combination.
+
+    `device` defaults to wherever kernels can actually run: CPU under the
+    Triton interpreter, CUDA when a GPU is present.
+    """
+    x, weight = make_inputs(shape, dtype, device=device)
     results: list[Result] = []
 
     fused_out = fused_rmsnorm_softmax(x, weight, EPS)
@@ -185,9 +191,9 @@ def run_case(shape: tuple[int, int], dtype: torch.dtype) -> list[Result]:
     return results
 
 
-def run_all(shapes, dtypes) -> list[Result]:
+def run_all(shapes, dtypes, device: str | None = None) -> list[Result]:
     results: list[Result] = []
     for dtype in dtypes:
         for shape in shapes:
-            results.extend(run_case(shape, dtype))
+            results.extend(run_case(shape, dtype, device=device))
     return results

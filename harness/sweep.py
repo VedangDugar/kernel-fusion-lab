@@ -20,7 +20,7 @@ import torch
 import triton
 
 from harness import benchmark, memory_model
-from harness.config import DTYPES, SHAPES
+from harness.config import DTYPES, SHAPES, default_device
 from harness.correctness import ASSERTED, REPORTED, run_all as run_correctness
 
 RESULTS_PATH = Path("docs/RESULTS.md")
@@ -60,8 +60,9 @@ def main() -> int:
     interpreter = os.environ.get("TRITON_INTERPRET") == "1"
     gpu = benchmark.gpu_available()
 
-    print("running correctness sweep ...")
-    correctness = run_correctness(SHAPES, DTYPES)
+    device = default_device()
+    print(f"running correctness sweep on {device} ...")
+    correctness = run_correctness(SHAPES, DTYPES, device=device)
     failures = [r for r in correctness if r.kind == ASSERTED and not r.passed]
 
     print("building analytical memory model ...")
@@ -79,6 +80,32 @@ def main() -> int:
     asserted_md, reported_md = _correctness_markdown(correctness)
     n_asserted = len([r for r in correctness if r.kind == ASSERTED])
     n_passed = n_asserted - len(failures)
+
+    if gpu:
+        not_established = """Also established by this run, because it was made on hardware:
+
+- The kernels are correct as *compiled* code, not merely as interpreted logic.
+  The two can differ: the interpreter evaluates `tl.exp` with NumPy, while a
+  GPU uses a faster approximate instruction.
+
+Still not established:
+
+- Whether the predicted traffic reduction is the *whole* explanation for the
+  measured speedup. Traffic is one term; launch overhead, occupancy, and cache
+  behaviour also move the result."""
+    else:
+        not_established = """Not established without a GPU run:
+
+- Any wall-clock speedup. The correctness figures above come from the Triton
+  CPU interpreter, which executes kernels sequentially in Python via NumPy and
+  models neither the memory hierarchy nor occupancy. No timing taken there
+  would mean anything, so none is reported.
+- That the kernels are correct as compiled code. The interpreter validates
+  logic; it evaluates `tl.exp` with NumPy rather than the GPU's approximate
+  instruction, so hardware numerics are unverified until this runs on a device.
+- Whether the predicted traffic reduction actually converts into a
+  proportional speedup. That depends on how close each variant runs to the
+  bandwidth roofline, which requires hardware to determine."""
     generated = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     dev = benchmark.device_name() or "none (CPU only)"
     peak_txt = f"{peak:.1f} GB/s (measured by device-to-device copy)" if peak else "not measured"
@@ -94,7 +121,8 @@ Generated {generated} by `python -m harness.sweep`. Do not edit by hand.
 | Python | {platform.python_version()} |
 | PyTorch | {torch.__version__} |
 | Triton | {triton.__version__} |
-| Execution | {"Triton CPU interpreter (TRITON_INTERPRET=1)" if interpreter else "native"} |
+| Execution | {"Triton CPU interpreter (TRITON_INTERPRET=1)" if interpreter else "compiled (native)"} |
+| Correctness ran on | {device} |
 | GPU | {dev} |
 | Measured peak bandwidth | {peak_txt} |
 
@@ -152,15 +180,7 @@ Established:
   pair, and roughly 7.5x fewer than naive eager PyTorch. This is arithmetic
   from shapes and dtype sizes, not a measurement.
 
-Not established without a GPU run:
-
-- Any wall-clock speedup. The correctness figures above come from the Triton
-  CPU interpreter, which executes kernels sequentially in Python via NumPy and
-  models neither the memory hierarchy nor occupancy. No timing taken there
-  would mean anything, so none is reported.
-- Whether the predicted traffic reduction actually converts into a
-  proportional speedup. That depends on how close each variant runs to the
-  bandwidth roofline, which requires hardware to determine.
+{not_established}
 """
 
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)

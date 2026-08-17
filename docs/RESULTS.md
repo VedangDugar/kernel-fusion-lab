@@ -1,6 +1,6 @@
 # Results
 
-Generated 2026-08-17 02:32 UTC by `python -m harness.sweep`. Do not edit by hand.
+Generated 2026-08-17 03:14 UTC by `python -m harness.sweep`. Do not edit by hand.
 
 ## Environment
 
@@ -10,6 +10,7 @@ Generated 2026-08-17 02:32 UTC by `python -m harness.sweep`. Do not edit by hand
 | PyTorch | 2.13.0+cpu |
 | Triton | 3.7.1 |
 | Execution | Triton CPU interpreter (TRITON_INTERPRET=1) |
+| Correctness ran on | cpu |
 | GPU | none (CPU only) |
 | Measured peak bandwidth | not measured |
 
@@ -140,6 +141,9 @@ Not established without a GPU run:
   CPU interpreter, which executes kernels sequentially in Python via NumPy and
   models neither the memory hierarchy nor occupancy. No timing taken there
   would mean anything, so none is reported.
+- That the kernels are correct as compiled code. The interpreter validates
+  logic; it evaluates `tl.exp` with NumPy rather than the GPU's approximate
+  instruction, so hardware numerics are unverified until this runs on a device.
 - Whether the predicted traffic reduction actually converts into a
   proportional speedup. That depends on how close each variant runs to the
   bandwidth roofline, which requires hardware to determine.

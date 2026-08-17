@@ -8,6 +8,7 @@ justified below.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -70,12 +71,42 @@ DTYPE_BYTES: dict[torch.dtype, int] = {
 }
 
 
+def default_device() -> str:
+    """Where kernels can actually execute in the current environment.
+
+    Under the Triton interpreter, kernels run on the CPU via NumPy and the
+    tensors must be CPU tensors. Compiled Triton requires device pointers and
+    rejects CPU tensors outright, so on a real GPU the inputs have to live
+    there. Getting this wrong surfaces as:
+
+        ValueError: Pointer argument (at 0) cannot be accessed from Triton
+    """
+    if os.environ.get("TRITON_INTERPRET") == "1":
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
 def make_inputs(
-    shape: tuple[int, int], dtype: torch.dtype, seed: int = 0, device: str = "cpu"
+    shape: tuple[int, int],
+    dtype: torch.dtype,
+    seed: int = 0,
+    device: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Deterministic (x, weight) pair for a case."""
-    generator = torch.Generator(device=device).manual_seed(seed)
+    """Deterministic (x, weight) pair for a case, on the appropriate device.
+
+    Values are always drawn on the CPU from a CPU generator and then moved, so
+    the same seed yields bit-identical inputs whether the run is on CPU or GPU.
+    Seeding a CUDA generator instead would produce a different stream and make
+    CPU and GPU results incomparable.
+    """
+    device = device or default_device()
+    generator = torch.Generator().manual_seed(seed)
     rows, cols = shape
-    x = torch.randn(rows, cols, generator=generator, device=device, dtype=torch.float32)
-    weight = torch.randn(cols, generator=generator, device=device, dtype=torch.float32)
-    return x.to(dtype), weight.to(dtype)
+    x = torch.randn(rows, cols, generator=generator, dtype=torch.float32)
+    weight = torch.randn(cols, generator=generator, dtype=torch.float32)
+    return (
+        x.to(device=device, dtype=dtype),
+        weight.to(device=device, dtype=dtype),
+    )
